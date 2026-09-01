@@ -1,0 +1,118 @@
+baseURL = "https://camheard.us/"
+locale = "en-us"
+title = "camheard.us"
+theme = "PaperMod"
+
+enableRobotsTXT = true
+enableInlineShortcodes = true
+buildDrafts = false
+buildFuture = false
+buildExpired = false
+
+[pagination]
+  pagerSize = 10
+
+[minify]
+  disableXML = true
+  minifyOutput = true
+
+# Enables PaperMod's Fuse.js client-side search (needs content/search.md too)
+[outputs]
+  home = ["HTML", "RSS", "JSON"]
+
+[params]
+  env = "production"
+  description = "A blog about Linux."
+  author = "Cameron Heard"
+  defaultTheme = "dark"
+  disableThemeToggle = false
+  ShowReadingTime = true
+  ShowCodeCopyButtons = true
+  ShowBreadCrumbs = true
+  ShowPostNavLinks = true
+  ShowWordCount = true
+  ShowToc = true
+  TocOpen = false
+  ShowShareButtons = false
+  ShowRssButtonInSectionTermList = true
+  hidemeta = false
+  comments = false
+
+  [params.profileMode]
+    enabled = true
+    title = "camheard.us"
+    subtitle = "Notes on Linux — the desktop, the terminal, and everything under /etc."
+    # imageUrl = "img/avatar.png"   # drop a file at assets/img/avatar.png to enable
+    imageWidth = 120
+    imageHeight = 120
+    imageTitle = "avatar"
+
+    [[params.profileMode.buttons]]
+      name = "Posts"
+      url = "posts"
+    [[params.profileMode.buttons]]
+      name = "Tags"
+      url = "tags"
+
+  # Alternative landing style — set profileMode.enabled = false to use this instead:
+  # [params.homeInfoParams]
+  #   Title = "Hi, I'm Cameron 👋"
+  #   Content = "I write about Linux."
+
+  [params.assets]
+    disableHLJS = true            # use Hugo/Chroma highlighting, not highlight.js
+    favicon = "favicon.ico"
+    favicon16x16 = "favicon-16x16.png"
+    favicon32x32 = "favicon-32x32.png"
+
+  [[params.socialIcons]]
+    name = "github"
+    url = "https://github.com/simontemplarST"
+  [[params.socialIcons]]
+    name = "rss"
+    url = "index.xml"
+
+  [params.fuseOpts]
+    isCaseSensitive = false
+    shouldSort = true
+    location = 0
+    distance = 1000
+    threshold = 0.4
+    minMatchCharLength = 0
+    keys = ["title", "permalink", "summary", "content"]
+
+[menu]
+  [[menu.main]]
+    identifier = "posts"
+    name = "Posts"
+    url = "/posts/"
+    weight = 10
+  [[menu.main]]
+    identifier = "tags"
+    name = "Tags"
+    url = "/tags/"
+    weight = 20
+  [[menu.main]]
+    identifier = "search"
+    name = "Search"
+    url = "/search/"
+    weight = 30
+  [[menu.main]]
+    identifier = "about"
+    name = "About"
+    url = "/about/"
+    weight = 40
+
+[markup]
+  [markup.highlight]
+    noClasses = false          # emit CSS classes so PaperMod themes the code blocks
+    codeFences = true
+    guessSyntax = true
+    lineNos = false
+    style = "monokai"
+    tabWidth = 4
+  [markup.goldmark.renderer]
+    unsafe = true              # allow raw HTML in Markdown
+  [markup.tableOfContents]
+    startLevel = 2
+    endLevel = 4
