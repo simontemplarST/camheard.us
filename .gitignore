@@ -3,3 +3,6 @@
 /.hugo_build.lock
 hugo_stats.json
 .DS_Store
+
+# local convenience scripts
+/deploy.sh

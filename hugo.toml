@@ -40,8 +40,8 @@ buildExpired = false
 
   [params.profileMode]
     enabled = true
-    title = "camheard.us"
-    subtitle = "Notes on Linux — the desktop, the terminal, and everything under /etc."
+    title = "Cameron Heard"
+    subtitle = "I'll talk about things on here, mostly about linux."
     # imageUrl = "img/avatar.png"   # drop a file at assets/img/avatar.png to enable
     imageWidth = 120
     imageHeight = 120
@@ -57,7 +57,7 @@ buildExpired = false
   # Alternative landing style — set profileMode.enabled = false to use this instead:
   # [params.homeInfoParams]
   #   Title = "Hi, I'm Cameron 👋"
-  #   Content = "I write about Linux."
+  #   Content = "I write about Linux, and IT in government."
 
   [params.assets]
     disableHLJS = true            # use Hugo/Chroma highlighting, not highlight.js
