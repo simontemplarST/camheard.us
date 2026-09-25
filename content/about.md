@@ -8,3 +8,5 @@ ShowToc = false
 +++
 
 I'm Cameron, an IT guy that uses Linux a lot, yet the overnight neckbeard syndrome has yet to afflict me. 
+
+I work in local government and It's cool. 
