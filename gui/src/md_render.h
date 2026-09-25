@@ -25,6 +25,16 @@ struct RenderStyle {
 	std::function<bool(const std::string &)> image_exists;
 	// Called when a link is clicked. Left null, links are drawn but inert.
 	std::function<void(const std::string &)> on_link;
+	// Window-local x to wrap at; 0 means the window's own right edge.
+	//
+	// The preview draws a centred column narrower than its pane, the way
+	// --main-width does on the real page, and it does that with an Indent
+	// plus a pushed text wrap position. Without telling the span layout
+	// about that position it wraps at the pane edge instead, and every token
+	// that starts between the two gets chopped a character at a time by
+	// ImGui's own wrapping inside the item. Narrow the pane -- open the
+	// outline rail, say -- and a paragraph turns into confetti.
+	float wrap_x = 0.0f;
 };
 
 // Renders into the current window at the current cursor, wrapping to the

@@ -41,7 +41,10 @@ std::string RTrim(const std::string &s) {
 void RenderSpans(const std::vector<Span> &spans, const RenderStyle &st, float size_px, ImU32 color) {
 	const float avail = ImGui::GetContentRegionAvail().x;
 	const float x_left = ImGui::GetCursorPosX();
-	const float x_max = x_left + (avail > 40.0f ? avail : 40.0f);
+	float x_max = x_left + (avail > 40.0f ? avail : 40.0f);
+	// A caller drawing into a narrower column than the window says where it
+	// ends, so the manual wrap and any pushed text wrap position agree.
+	if (st.wrap_x > x_left + 40.0f && st.wrap_x < x_max) x_max = st.wrap_x;
 	bool line_has_content = false;
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 

@@ -17,7 +17,9 @@ bool IsPrimaryKey(const std::string &k) {
 	return k == "title" || k == "date" || k == "draft" || k == "summary" || k == "tags";
 }
 
-void ApplyAction(EditAction act, const std::string &arg, std::string *t, int *a, int *b) {
+void ApplyAction(Editor &e, std::string *t, int *a, int *b) {
+	const EditAction act = e.pending;
+	const std::string &arg = e.pending_arg;
 	switch (act) {
 	case EditAction::Bold: md::WrapSelection(t, a, b, "**", "**"); break;
 	case EditAction::Italic: md::WrapSelection(t, a, b, "*", "*"); break;
@@ -36,6 +38,21 @@ void ApplyAction(EditAction act, const std::string &arg, std::string *t, int *a,
 	case EditAction::Table:
 		md::InsertText(t, a, b, "\n| Column | Column |\n| --- | --- |\n|  |  |\n");
 		break;
+	// The find bar's three. Select changes no text at all -- it exists
+	// because moving the caret from outside the widget doesn't survive
+	// either, for exactly the reason editing it doesn't.
+	case EditAction::Select:
+		*a = e.pending_sel_a;
+		*b = e.pending_sel_b;
+		if (*a > (int)t->size()) *a = (int)t->size();
+		if (*b > (int)t->size()) *b = (int)t->size();
+		break;
+	case EditAction::ReplaceCurrent:
+		md::ReplaceOne(t, a, b, e.find_text, e.pending_repl, e.pending_case);
+		break;
+	case EditAction::ReplaceEvery:
+		md::ReplaceAll(t, a, b, e.find_text, e.pending_repl, e.pending_case);
+		break;
 	case EditAction::None: break;
 	}
 }
@@ -50,12 +67,20 @@ int EditorCallback(ImGuiInputTextCallbackData *data) {
 
 	if (e->pending != EditAction::None) {
 		std::string t(data->Buf, (size_t)data->BufTextLen);
+		const std::string before = t;
 		int a = e->sel_a, b = e->sel_b;
 		if (a > data->BufTextLen) a = data->BufTextLen;
 		if (b > data->BufTextLen) b = data->BufTextLen;
-		ApplyAction(e->pending, e->pending_arg, &t, &a, &b);
-		data->DeleteChars(0, data->BufTextLen);
-		data->InsertChars(0, t.c_str());
+		ApplyAction(*e, &t, &a, &b);
+		// A jump to a match rewrites nothing, and must not mark the post
+		// dirty or make ImGui rebuild the buffer for no reason.
+		if (t != before) {
+			data->DeleteChars(0, data->BufTextLen);
+			data->InsertChars(0, t.c_str());
+			e->dirty = true;
+		}
+		// Changing CursorPos from in here is also what scrolls the box to
+		// the caret: ImGui sets CursorFollow when a callback moves it.
 		data->CursorPos = b;
 		data->SelectionStart = a;
 		data->SelectionEnd = b;
@@ -63,7 +88,6 @@ int EditorCallback(ImGuiInputTextCallbackData *data) {
 		e->sel_b = b;
 		e->pending = EditAction::None;
 		e->pending_arg.clear();
-		e->dirty = true;
 	} else {
 		int a = data->SelectionStart, b = data->SelectionEnd;
 		if (a > b) std::swap(a, b);
@@ -321,6 +345,11 @@ void Toolbar(App &a) {
 		ed.link_url = "/img/";
 		ImGui::OpenPopup("imagepopup");
 	}
+	// Where the buttons end, in window-local x. Read here because by the
+	// time the word count is drawn the cursor has already wrapped to the
+	// next line, and comparing against that says there is room when there
+	// isn't.
+	const float toolbar_end = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
 
 	if (ImGui::BeginPopup("linkpopup")) {
 		ImGui::TextUnformatted("Link URL");
@@ -371,12 +400,195 @@ void Toolbar(App &a) {
 	         fm::WordCount(ed.body) / 200 + 1);
 	ImGui::PushFont(Theme::F_UI, Theme::UI_PX * 0.82f);
 	float w = ImGui::CalcTextSize(buf).x;
-	ImGui::SameLine(ImGui::GetContentRegionMax().x - w - 4);
-	ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(Theme::TEXT_FAINT));
+	float at = ImGui::GetContentRegionMax().x - w - 4;
+	// Only when it fits: with the outline rail open the toolbar can reach
+	// this far, and a word count printed on top of the image button is
+	// worse than no word count.
+	if (at > toolbar_end + 12) {
+		ImGui::SameLine(at);
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(Theme::TEXT_FAINT));
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted(buf);
+		ImGui::PopStyleColor();
+	} else {
+		ImGui::NewLine();
+	}
+	ImGui::PopFont();
+}
+
+// The find bar (Ctrl+F). It sits under the front-matter bar rather than
+// floating over the text: a search box that covers the thing being searched
+// is a classic, and there is room for a real one here.
+//
+// Every jump and every replacement goes through the same queue the toolbar
+// uses, for the same reason -- see EditAction in app.h. The extra wrinkle is
+// focus: applying the action needs the text box active, so focus is taken
+// for a frame and handed straight back, or the next thing typed into the
+// find box would land in the post.
+void FindBar(App &a) {
+	Editor &ed = a.ed;
+	std::vector<int> hits = md::FindAll(ed.body, ed.find_text, ed.find_case);
+	int cur = -1;
+	for (int i = 0; i < (int)hits.size(); i++)
+		if (hits[i] == ed.find_at) cur = i;
+
+	auto jump_to = [&](int idx) {
+		if (hits.empty()) return;
+		idx = (idx % (int)hits.size() + (int)hits.size()) % (int)hits.size();
+		ed.find_at = hits[idx];
+		ed.pending_sel_a = hits[idx];
+		ed.pending_sel_b = hits[idx] + (int)ed.find_text.size();
+		ed.pending = EditAction::Select;
+		ed.focus_editor = true;
+		ed.refocus_find = true;
+	};
+	auto step = [&](bool back) {
+		if (hits.empty()) return;
+		if (cur >= 0) {
+			jump_to(cur + (back ? -1 : 1));
+			return;
+		}
+		// Nothing current: start from wherever the caret is, and wrap.
+		if (back) {
+			int pick = (int)hits.size() - 1;
+			for (int i = (int)hits.size() - 1; i >= 0; i--)
+				if (hits[i] < ed.sel_a) { pick = i; break; }
+			jump_to(pick);
+		} else {
+			int pick = 0;
+			for (int i = 0; i < (int)hits.size(); i++)
+				if (hits[i] >= ed.sel_a) { pick = i; break; }
+			jump_to(pick);
+		}
+	};
+
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::V4(Theme::PANEL));
+	ImGui::BeginChild("findbar", ImVec2(0, ImGui::GetFrameHeight() + 16),
+	                  ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+	                  ImGuiWindowFlags_NoScrollbar);
+
+	if (ed.focus_find) {
+		ImGui::SetKeyboardFocusHere();
+		ed.focus_find = false;
+	}
+	ImGui::SetNextItemWidth(260);
+	bool enter = ImGui::InputTextWithHint("##find", "find", &ed.find_text,
+	                                      ImGuiInputTextFlags_EnterReturnsTrue);
+	if (enter) step(ImGui::GetIO().KeyShift);
+
+	ImGui::SameLine();
+	if (W::ToolButton("Aa", "match case", ed.find_case)) {
+		ed.find_case = !ed.find_case;
+		ed.find_at = -1;
+	}
+	ImGui::SameLine();
+	ImGui::BeginDisabled(hits.empty());
+	if (W::ToolButton("<", "previous match  (Shift+Enter)")) step(true);
+	ImGui::SameLine(0, 3);
+	if (W::ToolButton(">", "next match  (Enter)")) step(false);
+	ImGui::EndDisabled();
+
+	ImGui::SameLine();
+	ImGui::PushStyleColor(ImGuiCol_Text,
+	                      Theme::V4(ed.find_text.empty() ? Theme::TEXT_FAINT
+	                                                     : (hits.empty() ? Theme::DANGER : Theme::TEXT_DIM)));
 	ImGui::AlignTextToFramePadding();
-	ImGui::TextUnformatted(buf);
+	if (ed.find_text.empty()) ImGui::TextUnformatted("       ");
+	else if (hits.empty()) ImGui::TextUnformatted("no matches");
+	else if (cur >= 0) ImGui::Text("%d of %d", cur + 1, (int)hits.size());
+	else ImGui::Text("%d match%s", (int)hits.size(), hits.size() == 1 ? "" : "es");
+	ImGui::PopStyleColor();
+
+	ImGui::SameLine(0, 18);
+	ImGui::SetNextItemWidth(260);
+	ImGui::InputTextWithHint("##replace", "replace with", &ed.replace_text);
+	ImGui::SameLine();
+	// Replace acts on the match the caret is sitting on, so it can never
+	// quietly eat a different piece of text than the one being looked at.
+	bool on_match = (cur >= 0 && ed.sel_a == ed.find_at &&
+	                 ed.sel_b == ed.find_at + (int)ed.find_text.size());
+	ImGui::BeginDisabled(!on_match);
+	if (ImGui::Button("Replace")) {
+		ed.pending = EditAction::ReplaceCurrent;
+		ed.pending_repl = ed.replace_text;
+		ed.pending_case = ed.find_case;
+		ed.find_at = -1;
+		ed.focus_editor = true;
+		ed.refocus_find = true;
+	}
+	ImGui::EndDisabled();
+	if (!on_match) ImGui::SetItemTooltip("jump to a match first (Enter)");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(hits.empty());
+	if (W::DangerButton("Replace all")) {
+		int n = (int)hits.size();
+		ed.pending = EditAction::ReplaceEvery;
+		ed.pending_repl = ed.replace_text;
+		ed.pending_case = ed.find_case;
+		ed.find_at = -1;
+		ed.focus_editor = true;
+		ed.refocus_find = true;
+		a.Notify("replaced " + std::to_string(n) + " occurrence" + (n == 1 ? "" : "s"));
+	}
+	ImGui::EndDisabled();
+
+	ImGui::SameLine(ImGui::GetContentRegionMax().x - 30);
+	if (ImGui::Button("x", ImVec2(24, 0))) ed.find_open = false;
+	ImGui::SetItemTooltip("close the find bar (Esc)");
+
+	ImGui::EndChild();
+	ImGui::PopStyleColor();
+
+	// Esc closes it from either box.
+	if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+		ed.find_open = false;
+		ed.focus_editor = true;
+	}
+}
+
+// The headings rail. A long post is navigated by its shape, and scrolling
+// for it is the one thing the split view makes harder rather than easier.
+void OutlinePane(App &a, const ImVec2 &size) {
+	Editor &ed = a.ed;
+	ImGui::BeginChild("outlinepane", size, ImGuiChildFlags_Borders);
+	ImGui::PushFont(Theme::F_UI, Theme::UI_PX * 0.78f);
+	ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(Theme::TEXT_FAINT));
+	ImGui::TextUnformatted("OUTLINE");
 	ImGui::PopStyleColor();
 	ImGui::PopFont();
+
+	std::vector<md::Heading> hs = md::Outline(ed.body);
+	if (hs.empty()) {
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(Theme::TEXT_FAINT));
+		ImGui::TextWrapped("No headings yet. The H1/H2/H3 buttons add them.");
+		ImGui::PopStyleColor();
+		ImGui::EndChild();
+		return;
+	}
+	// Which heading the caret is under, so the rail says where you are.
+	int current = -1;
+	for (int i = 0; i < (int)hs.size(); i++)
+		if (hs[i].offset <= ed.sel_a) current = i;
+
+	for (int i = 0; i < (int)hs.size(); i++) {
+		const md::Heading &h = hs[i];
+		float indent = (h.level - 1) * 12.0f;
+		if (indent > 0) ImGui::Indent(indent);
+		ImGui::PushID(i);
+		ImGui::PushFont(h.level == 1 ? Theme::F_BOLD : Theme::F_UI, Theme::UI_PX * 0.88f);
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(i == current ? Theme::TEXT : Theme::TEXT_DIM));
+		if (ImGui::Selectable(h.text.empty() ? "(untitled)" : h.text.c_str(), i == current)) {
+			ed.pending_sel_a = ed.pending_sel_b = h.offset;
+			ed.pending = EditAction::Select;
+			ed.focus_editor = true;
+		}
+		ImGui::PopStyleColor();
+		ImGui::PopFont();
+		ImGui::SetItemTooltip("line %d", h.line + 1);
+		ImGui::PopID();
+		if (indent > 0) ImGui::Unindent(indent);
+	}
+	ImGui::EndChild();
 }
 
 void SourcePane(App &a, const ImVec2 &size) {
@@ -392,6 +604,10 @@ void SourcePane(App &a, const ImVec2 &size) {
 		if (ImGui::IsKeyPressed(ImGuiKey_K, false)) {
 			ed.link_url = "https://";
 			ImGui::OpenPopup("linkpopup");
+		}
+		if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+			ed.find_open = true;
+			ed.focus_find = true;
 		}
 	}
 
@@ -457,6 +673,7 @@ void PreviewPane(App &a, const ImVec2 &size) {
 	}
 
 	md::RenderStyle st = a.PreviewStyle(ed.preview_dark);
+	st.wrap_x = pad + col;
 	md::Render(a.Blocks(), st);
 
 	if (!ed.doc.GetList("tags").empty()) {
@@ -543,9 +760,9 @@ void DrawEditorTab(App &a) {
 	if (W::PrimaryButton("Save", ImVec2(110, 0))) a.SavePost();
 	ImGui::EndDisabled();
 
-	// View mode + preview theme, on the left of those.
+	// View mode, preview theme, and the two panes that can be toggled.
 	const char *modes[] = {"Split", "Source", "Preview"};
-	right -= 210;
+	right -= 372;
 	ImGui::SameLine(right);
 	for (int i = 0; i < 3; i++) {
 		if (W::ToolButton(modes[i], nullptr, ed.view == i)) ed.view = i;
@@ -553,11 +770,26 @@ void DrawEditorTab(App &a) {
 	}
 	if (W::ToolButton(ed.preview_dark ? "dark" : "light", "preview in the site's dark or light theme"))
 		ed.preview_dark = !ed.preview_dark;
+	ImGui::SameLine(0, 10);
+	if (W::ToolButton("outline", "the headings in this post", ed.show_outline))
+		ed.show_outline = !ed.show_outline;
+	ImGui::SameLine(0, 3);
+	if (W::ToolButton("find", "find and replace  (Ctrl+F)", ed.find_open)) {
+		ed.find_open = !ed.find_open;
+		ed.focus_find = ed.find_open;
+	}
 	ImGui::NewLine();
 
 	FrontMatterBar(a);
+	if (ed.find_open) FindBar(a);
 
 	ImVec2 avail = ImGui::GetContentRegionAvail();
+	if (ed.show_outline) {
+		const float rail = 220.0f;
+		OutlinePane(a, ImVec2(rail, avail.y));
+		ImGui::SameLine(0, 10);
+		avail.x -= rail + 10;
+	}
 	if (ed.view == 1) {
 		SourcePane(a, avail);
 	} else if (ed.view == 2) {
@@ -567,5 +799,12 @@ void DrawEditorTab(App &a) {
 		SourcePane(a, ImVec2(half, avail.y));
 		ImGui::SameLine(0, 10);
 		PreviewPane(a, ImVec2(avail.x - half - 10, avail.y));
+	}
+
+	// The find bar borrowed focus so its action could be applied inside the
+	// text box's callback; now that it has been, hand focus back.
+	if (ed.refocus_find && ed.pending == EditAction::None) {
+		ed.refocus_find = false;
+		ed.focus_find = true;
 	}
 }

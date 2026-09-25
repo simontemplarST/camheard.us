@@ -512,4 +512,126 @@ void MakeLink(std::string *text, int *a, int *b, const std::string &url, bool im
 	*b = *a + (int)label.size();
 }
 
+// ---- find and replace -----------------------------------------------------
+
+namespace {
+
+// Case-folded search, so the case-insensitive path doesn't have to copy the
+// whole body every keystroke the find box gets.
+size_t FindFrom(const std::string &hay, const std::string &needle, size_t from, bool cs) {
+	if (needle.empty() || needle.size() > hay.size()) return std::string::npos;
+	for (size_t i = from; i + needle.size() <= hay.size(); i++) {
+		size_t j = 0;
+		for (; j < needle.size(); j++) {
+			char x = hay[i + j], y = needle[j];
+			if (!cs) {
+				x = (char)tolower((unsigned char)x);
+				y = (char)tolower((unsigned char)y);
+			}
+			if (x != y) break;
+		}
+		if (j == needle.size()) return i;
+	}
+	return std::string::npos;
+}
+
+} // namespace
+
+std::vector<int> FindAll(const std::string &hay, const std::string &needle, bool cs) {
+	std::vector<int> out;
+	if (needle.empty()) return out;
+	size_t at = 0;
+	while ((at = FindFrom(hay, needle, at, cs)) != std::string::npos) {
+		out.push_back((int)at);
+		at += needle.size();  // non-overlapping: "aa" in "aaaa" is two, not three
+	}
+	return out;
+}
+
+bool ReplaceOne(std::string *text, int *a, int *b, const std::string &needle, const std::string &repl,
+                bool cs) {
+	Clamp(*text, a, b);
+	if (needle.empty()) return false;
+	if (*b - *a != (int)needle.size()) return false;
+	if (FindFrom(*text, needle, (size_t)*a, cs) != (size_t)*a) return false;
+	text->replace(*a, needle.size(), repl);
+	*b = *a + (int)repl.size();
+	return true;
+}
+
+int ReplaceAll(std::string *text, int *a, int *b, const std::string &needle, const std::string &repl,
+               bool cs) {
+	Clamp(*text, a, b);
+	if (needle.empty()) return 0;
+	// The caret is carried across by rebuilding it in the output as the
+	// output is built, rather than by adding up deltas afterwards: a caret
+	// that happened to sit *inside* a match has no position to be shifted
+	// from, and lands at the end of that match's replacement instead.
+	std::string out;
+	out.reserve(text->size());
+	int caret = *a, moved_to = -1, n = 0;
+	size_t at = 0, from = 0;
+	while ((at = FindFrom(*text, needle, from, cs)) != std::string::npos) {
+		out.append(*text, from, at - from);
+		if (moved_to < 0 && caret >= (int)from && caret < (int)at)
+			moved_to = (int)out.size() - ((int)at - caret);
+		out += repl;
+		if (moved_to < 0 && caret >= (int)at && caret < (int)(at + needle.size()))
+			moved_to = (int)out.size();
+		from = at + needle.size();
+		n++;
+	}
+	if (n == 0) return 0;
+	out.append(*text, from, std::string::npos);
+	if (moved_to < 0) moved_to = (int)out.size() - ((int)text->size() - caret);
+	*text = out;
+	*a = moved_to;
+	*b = *a;
+	Clamp(*text, a, b);
+	return n;
+}
+
+// ---- outline --------------------------------------------------------------
+
+std::vector<Heading> Outline(const std::string &markdown) {
+	std::vector<Heading> out;
+	bool in_fence = false;
+	std::string fence;
+	size_t off = 0;
+	int line_no = 0;
+	while (off <= markdown.size()) {
+		size_t nl = markdown.find('\n', off);
+		std::string line = markdown.substr(off, (nl == std::string::npos ? markdown.size() : nl) - off);
+		// Leading indentation doesn't stop Goldmark seeing a heading until
+		// it reaches four spaces, and a trailing \r doesn't either.
+		std::string lead = util::Trim(line);
+
+		if (in_fence) {
+			if (lead.compare(0, fence.size(), fence) == 0) in_fence = false;
+		} else if (lead.compare(0, 3, "```") == 0 || lead.compare(0, 3, "~~~") == 0) {
+			in_fence = true;
+			fence = lead.substr(0, 3);
+		} else if (!lead.empty() && lead[0] == '#') {
+			size_t h = 0;
+			while (h < lead.size() && lead[h] == '#') h++;
+			// "#tag" is not a heading; "# " and a bare "#" are.
+			if (h <= 6 && (h >= lead.size() || lead[h] == ' ')) {
+				Heading hd;
+				hd.level = (int)h;
+				hd.text = util::Trim(lead.substr(h));
+				// Trailing closing hashes are decoration, not text.
+				while (!hd.text.empty() && hd.text.back() == '#') hd.text.pop_back();
+				hd.text = util::Trim(hd.text);
+				hd.line = line_no;
+				hd.offset = (int)off;
+				out.push_back(hd);
+			}
+		}
+		if (nl == std::string::npos) break;
+		off = nl + 1;
+		line_no++;
+	}
+	return out;
+}
+
 } // namespace md

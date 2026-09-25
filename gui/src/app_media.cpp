@@ -20,19 +20,34 @@ void DrawMediaTab(App &a) {
 	ImGui::PopStyleColor();
 	ImGui::Dummy(ImVec2(0, 6));
 
+	// The Check tab's report is what knows which of these anything points
+	// at, so the same pass answers it here.
+	a.EnsureAudit();
+
 	ImGui::SetNextItemWidth(260);
 	ImGui::InputTextWithHint("##mfilter", "filter", &a.media_filter);
 	ImGui::SameLine();
 	if (ImGui::Button("Rescan")) {
 		a.site.ScanMedia();
+		a.audit_stale = true;
 		a.Notify("rescanned static/ and assets/");
+	}
+	ImGui::SameLine(0, 18);
+	ImGui::Checkbox("only unreferenced", &a.media_only_orphans);
+	ImGui::SetItemTooltip("files no page and no setting in hugo.toml points at");
+	if (!a.report.unreferenced.empty()) {
+		ImGui::SameLine();
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(Theme::TEXT_FAINT));
+		ImGui::AlignTextToFramePadding();
+		ImGui::Text("%d of %d", (int)a.report.unreferenced.size(), (int)a.site.media.size());
+		ImGui::PopStyleColor();
 	}
 
 	ImGui::Dummy(ImVec2(0, 4));
 	float detail_w = 344;
 	ImVec2 avail = ImGui::GetContentRegionAvail();
 	ImGui::BeginChild("mlist", ImVec2(avail.x - detail_w, 0), ImGuiChildFlags_None);
-	if (ImGui::BeginTable("media", 4,
+	if (ImGui::BeginTable("media", 5,
 	                      ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY |
 	                          ImGuiTableFlags_SizingStretchProp)) {
 		ImGui::TableSetupScrollFreeze(0, 1);
@@ -40,10 +55,13 @@ void DrawMediaTab(App &a) {
 		ImGui::TableSetupColumn("Served at", ImGuiTableColumnFlags_WidthStretch, 2.0f);
 		ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthStretch, 0.8f);
 		ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+		ImGui::TableSetupColumn("Used", ImGuiTableColumnFlags_WidthStretch, 0.9f);
 		ImGui::TableHeadersRow();
 		for (int i = 0; i < (int)a.site.media.size(); i++) {
 			const site::MediaFile &m = a.site.media[i];
 			if (!a.media_filter.empty() && !util::IContains(m.rel, a.media_filter)) continue;
+			bool orphan = a.report.Unreferenced(m.rel);
+			if (a.media_only_orphans && !orphan) continue;
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(0);
 			ImGui::PushID(i);
@@ -58,6 +76,14 @@ void DrawMediaTab(App &a) {
 			ImGui::TableSetColumnIndex(3);
 			ImGui::TextUnformatted(util::HumanSize(m.size).c_str());
 			ImGui::PopStyleColor();
+			ImGui::TableSetColumnIndex(4);
+			bool shipped = audit::AlwaysShipped(m.rel);
+			ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(orphan ? Theme::WARN : Theme::TEXT_FAINT));
+			ImGui::TextUnformatted(orphan ? "nothing" : shipped ? "always shipped" : "referenced");
+			ImGui::PopStyleColor();
+			if (shipped)
+				ImGui::SetItemTooltip("a browser or the host asks for this one by name, so it is never "
+				                      "reported as unused");
 		}
 		ImGui::EndTable();
 	}
@@ -113,6 +139,16 @@ void DrawMediaTab(App &a) {
 	ImGui::Text("saved %s", util::PrettyEpoch(util::MTime(m.path)).c_str());
 	ImGui::PopStyleColor();
 
+	if (a.report.Unreferenced(m.rel)) {
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(Theme::WARN));
+		ImGui::TextWrapped("Nothing points at this.");
+		ImGui::PopStyleColor();
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(Theme::TEXT_FAINT));
+		ImGui::TextWrapped("No page under content/ and no setting in hugo.toml refers to it. It is still "
+		                   "published -- this is housekeeping, not an error.");
+		ImGui::PopStyleColor();
+	}
+
 	W::SectionHeader("Actions");
 	if (ImGui::Button("Copy markdown", ImVec2(-1, 0))) {
 		ImGui::SetClipboardText(snippet.c_str());
@@ -143,6 +179,7 @@ void DrawMediaTab(App &a) {
 		if (W::DangerButton("Delete", ImVec2(110, 0))) {
 			if (unlink(path.c_str()) == 0) {
 				a.site.ScanMedia();
+				a.audit_stale = true;
 				a.media_selected = -1;
 				a.Notify("deleted " + util::BaseName(path));
 			} else {

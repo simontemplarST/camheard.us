@@ -50,6 +50,8 @@ APP_SOURCES := \
 	src/app_design.cpp \
 	src/app_media.cpp \
 	src/app_publish.cpp \
+	src/app_check.cpp \
+	src/app_palette.cpp \
 	src/md_render.cpp \
 	src/shot.cpp \
 	src/theme.cpp \
@@ -58,6 +60,8 @@ APP_SOURCES := \
 	src/md.cpp \
 	src/fm.cpp \
 	src/site.cpp \
+	src/audit.cpp \
+	src/fuzzy.cpp \
 	src/toml_edit.cpp \
 	src/util.cpp \
 	$(IMGUI_DIR)/imgui.cpp \
@@ -81,7 +85,8 @@ run: $(TARGET)
 # ---- tests -----------------------------------------------------------------
 # No SDL, no GL, no window: the whole parsing/editing layer is plain strings
 # and files, so this builds and runs anywhere the compiler does.
-TEST_SOURCES := tests/core_test.cpp src/md.cpp src/fm.cpp src/site.cpp src/toml_edit.cpp src/util.cpp
+TEST_SOURCES := tests/core_test.cpp src/md.cpp src/fm.cpp src/site.cpp src/toml_edit.cpp \
+	src/util.cpp src/audit.cpp src/fuzzy.cpp
 TEST_OBJECTS := $(TEST_SOURCES:.cpp=.test.o)
 TEST_TARGET := core_test
 

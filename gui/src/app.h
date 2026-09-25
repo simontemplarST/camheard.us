@@ -6,6 +6,7 @@
 // subprocess is running, and when the content tree was last rescanned.
 #pragma once
 
+#include "audit.h"
 #include "fm.h"
 #include "md.h"
 #include "md_render.h"
@@ -17,7 +18,7 @@
 #include <string>
 #include <vector>
 
-enum class Tab { Content, Editor, Design, Media, Publish, COUNT };
+enum class Tab { Content, Editor, Design, Media, Check, Publish, COUNT };
 
 // A toolbar action, applied to the editor's text on the next frame from
 // inside the InputText callback. It has to happen there rather than here:
@@ -26,7 +27,14 @@ enum class Tab { Content, Editor, Design, Media, Publish, COUNT };
 // reverted (imgui_widgets.cpp, "Handle reapplying final data on
 // deactivation"). Going through the callback keeps ImGui's copy and ours the
 // same string at all times.
-enum class EditAction { None, Bold, Italic, InlineCode, Strike, H1, H2, H3, Bullet, Number, Quote, CodeBlock, Link, Image, Rule, Table };
+enum class EditAction {
+	None, Bold, Italic, InlineCode, Strike, H1, H2, H3, Bullet, Number, Quote, CodeBlock,
+	Link, Image, Rule, Table,
+	// Find, replace and the outline go through the same queue for the same
+	// reason the formatting buttons do: they change the text or the caret
+	// from outside the widget, which only survives inside the callback.
+	Select, ReplaceCurrent, ReplaceEvery,
+};
 
 struct Editor {
 	std::string path;              // open file, empty = nothing open
@@ -56,6 +64,29 @@ struct Editor {
 	std::string new_key;
 	std::string link_url;
 	std::string status;
+
+	// ---- find and replace (Ctrl+F)
+	bool find_open = false;
+	std::string find_text;
+	std::string replace_text;
+	bool find_case = false;
+	bool focus_find = false;
+	// Byte offset of the match the caret is on, -1 when none is current.
+	// Recomputed from the body each frame the bar is open, so it survives
+	// the text changing underneath it.
+	int find_at = -1;
+
+	// Where EditAction::Select should put the caret, and what the two
+	// replace actions should do when the callback next runs.
+	int pending_sel_a = 0, pending_sel_b = 0;
+	std::string pending_repl;
+	bool pending_case = false;
+	// Set when an action was queued from the find bar: applying it needs
+	// the text box focused, so focus has to be handed back afterwards or
+	// the next keystroke goes to the wrong widget.
+	bool refocus_find = false;
+
+	bool show_outline = false;
 };
 
 struct App {
@@ -83,7 +114,22 @@ struct App {
 	// Media tab
 	std::string media_filter;
 	int media_selected = -1;
+	bool media_only_orphans = false;
 	std::vector<std::string> dropped_files;  // from SDL_DROPFILE
+
+	// Check tab. The report is cached rather than recomputed per frame --
+	// it re-reads every page under content/ -- and invalidated by anything
+	// that could change the answer.
+	audit::Report report;
+	bool audit_stale = true;
+	int check_kind_filter = 0;   // 0 = everything, else 1 + (int)audit::Kind
+	bool check_hide_info = false;
+
+	// Quick open (Ctrl+P)
+	bool want_palette = false;
+	std::string palette_q;
+	int palette_sel = 0;
+	bool want_shortcuts = false;
 
 	// Publish tab
 	std::string commit_msg;
@@ -105,11 +151,17 @@ struct App {
 	std::string confirm_delete;    // path pending a delete confirmation
 	bool want_quit = false;
 	bool confirm_quit = false;
+	// A page waiting on the unsaved-changes prompt, raised by RequestOpen.
+	std::string pending_open;
 
 	void Notify(const std::string &msg, bool bad = false);
 	void ReloadAll();
 	void ReloadConfig();
 	bool OpenPost(const std::string &path);
+	// What everything outside main() should call: opens `path`, unless the
+	// editor has unsaved changes, in which case it asks first. Opening
+	// another page used to discard them without a word.
+	void RequestOpen(const std::string &path);
 	bool SavePost();
 	bool SaveConfig();
 	void CloseEditor();
@@ -122,11 +174,16 @@ struct App {
 	void StartServer();
 	void RunTask(const std::vector<std::string> &argv);
 	std::vector<std::string> AllTags() const;
+	// Runs the site check if anything has changed since the last one.
+	void EnsureAudit();
 };
 
 void DrawContentTab(App &a);
 void DrawEditorTab(App &a);
 void DrawDesignTab(App &a);
 void DrawMediaTab(App &a);
+void DrawCheckTab(App &a);
 void DrawPublishTab(App &a);
 void DrawNewPostModal(App &a);
+void DrawPalette(App &a);
+void DrawShortcutsWindow(App &a);

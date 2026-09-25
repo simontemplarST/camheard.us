@@ -5,14 +5,18 @@
 // (not failed) when it isn't there, so this runs from a bare checkout.
 //
 //   make test
+#include "../src/audit.h"
 #include "../src/fm.h"
+#include "../src/fuzzy.h"
 #include "../src/md.h"
 #include "../src/site.h"
 #include "../src/toml_edit.h"
 #include "../src/util.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
+#include <unistd.h>
 
 static int g_fail = 0, g_pass = 0;
 
@@ -420,6 +424,201 @@ static void test_markdown_transform() {
 	CHECK_EQ(t4, "# Title\n"); // a different level replaces, never stacks
 }
 
+
+// ------------------------------------------------------------------- find
+
+static void test_find_replace() {
+	section("markdown: find and replace");
+	const std::string hay = "Hugo and hugo and HUGO";
+	CHECK_EQ(md::FindAll(hay, "hugo", false).size(), (size_t)3);
+	CHECK_EQ(md::FindAll(hay, "hugo", true).size(), (size_t)1);
+	CHECK_EQ(md::FindAll(hay, "hugo", false)[1], 9);
+	CHECK_EQ(md::FindAll(hay, "", false).size(), (size_t)0);
+	// Non-overlapping: "aa" appears twice in "aaaa", not three times.
+	CHECK_EQ(md::FindAll("aaaa", "aa", false).size(), (size_t)2);
+
+	// ReplaceOne only fires when the selection really is the match, so a
+	// stale selection can never eat the wrong text.
+	std::string t = "the cat sat";
+	int a = 4, b = 7;
+	CHECK(md::ReplaceOne(&t, &a, &b, "cat", "dog", false));
+	CHECK_EQ(t, "the dog sat");
+	CHECK_EQ(a, 4);
+	CHECK_EQ(b, 7);
+	a = 0; b = 3;
+	CHECK(!md::ReplaceOne(&t, &a, &b, "cat", "dog", false));
+	CHECK_EQ(t, "the dog sat");
+
+	std::string t2 = "one two one two";
+	int c = 15, d = 15;   // caret at the very end
+	CHECK_EQ(md::ReplaceAll(&t2, &c, &d, "one", "three", false), 2);
+	CHECK_EQ(t2, "three two three two");
+	CHECK_EQ(c, 19);      // the caret followed the text that grew before it
+
+	// A caret sitting inside a replaced match lands after its replacement
+	// rather than somewhere in the middle of the new word.
+	std::string t3 = "alpha beta";
+	int e = 2, f = 2;
+	CHECK_EQ(md::ReplaceAll(&t3, &e, &f, "alpha", "x", false), 1);
+	CHECK_EQ(t3, "x beta");
+	CHECK_EQ(e, 1);
+
+	// Case sensitivity is honoured in both directions.
+	std::string t4 = "Cat cat";
+	int g = 0, h = 0;
+	CHECK_EQ(md::ReplaceAll(&t4, &g, &h, "cat", "dog", true), 1);
+	CHECK_EQ(t4, "Cat dog");
+}
+
+static void test_outline() {
+	section("markdown: outline");
+	const std::string body =
+	    "intro paragraph\n"
+	    "# Title\n"
+	    "words\n"
+	    "## Second ##\n"
+	    "```sh\n"
+	    "# not a heading, it is a shell comment\n"
+	    "```\n"
+	    "### Third\n"
+	    "#hashtag is not one either\n";
+	std::vector<md::Heading> o = md::Outline(body);
+	CHECK_EQ(o.size(), (size_t)3);
+	CHECK_EQ(o[0].text, "Title");
+	CHECK_EQ(o[0].level, 1);
+	CHECK_EQ(o[0].line, 1);
+	CHECK_EQ(body.substr(o[0].offset, 7), "# Title");
+	CHECK_EQ(o[1].text, "Second");   // the closing #s are decoration
+	CHECK_EQ(o[1].level, 2);
+	CHECK_EQ(o[2].text, "Third");
+	CHECK_EQ(o[2].level, 3);
+	CHECK_EQ(body.substr(o[2].offset, 9), "### Third");
+}
+
+// ------------------------------------------------------------------ fuzzy
+
+static void test_fuzzy() {
+	section("fuzzy: the palette's ranking");
+	CHECK(fuzzy::Score("about", "abt").hit);
+	CHECK(!fuzzy::Score("about", "abz").hit);
+	CHECK(fuzzy::Score("anything", "").hit);        // empty needle lists everything
+	CHECK(!fuzzy::Score("", "a").hit);
+	CHECK(fuzzy::Score("About The Site", "abt").hit); // case-insensitive
+
+	// The tightened pass: "abt" in "about" matches the a-b-t that ends
+	// where the first match ends, not the leftmost spread-out one.
+	std::vector<int> pos = fuzzy::Score("about", "abt").pos;
+	CHECK_EQ(pos.size(), (size_t)3);
+	CHECK_EQ(pos[2], 4);
+
+	// Ranking: the whole point. A prefix beats a scattered match, a
+	// word-boundary match beats a mid-word one, and a run of letters beats
+	// the same letters spread out.
+	CHECK(fuzzy::Score("posts/hello.md", "hello").score >
+	      fuzzy::Score("hollow shell below", "hello").score);
+	CHECK(fuzzy::Score("content/posts/setup.md", "setup").score >
+	      fuzzy::Score("content/posts/sadly-eating-up.md", "setup").score);
+	CHECK(fuzzy::Score("New post", "np").score > fuzzy::Score("unwrap", "np").score);
+}
+
+// ------------------------------------------------------------------ audit
+
+static void test_audit_refs() {
+	section("audit: pulling links out of a body");
+	const std::string body =
+	    "A [link](/posts/one/) and an ![image](/img/a.png).\n"
+	    "`[code](/not/a/link/)` stays out of it.\n"
+	    "```\n[fenced](/nor/this/)\n```\n"
+	    "<img src=\"/img/b.png\"> and <a href='/about/'>about</a>\n"
+	    "[ref]: /posts/two/\n";
+	std::vector<audit::Ref> refs = audit::ExtractRefs(body);
+	CHECK_EQ(refs.size(), (size_t)5);
+	CHECK_EQ(refs[0].target, "/posts/one/");
+	CHECK(!refs[0].image);
+	CHECK_EQ(refs[0].line, 1);
+	CHECK_EQ(refs[1].target, "/img/a.png");
+	CHECK(refs[1].image);
+	CHECK_EQ(refs[2].target, "/img/b.png");
+	CHECK(refs[2].image);
+	CHECK_EQ(refs[3].target, "/about/");
+	CHECK_EQ(refs[4].target, "/posts/two/");
+
+	// A title after the URL is not part of it, and <> wrappers come off.
+	std::vector<audit::Ref> r2 = audit::ExtractRefs("[a](<{{< ref \"x\" >}}>) [b](/c/ \"title\")\n");
+	CHECK_EQ(r2.size(), (size_t)2);
+	CHECK_EQ(r2[1].target, "/c/");
+
+	CHECK(audit::IsExternal("https://example.com"));
+	CHECK(audit::IsExternal("#anchor"));
+	CHECK(audit::IsExternal("mailto:a@b.c"));
+	CHECK(audit::IsExternal("{{< ref \"x\" >}}"));
+	CHECK(!audit::IsExternal("/posts/one/"));
+}
+
+static void test_audit_run() {
+	section("audit: a whole site");
+	// A site built in a temp directory, so this stays offline and leaves
+	// nothing behind.
+	const char *tmp = getenv("TMPDIR");
+	std::string root = std::string(tmp && *tmp ? tmp : "/tmp") + "/hugofe-audit-test";
+	util::MakeDirs(root + "/content/posts");
+	util::MakeDirs(root + "/static/img");
+	util::WriteFileAtomic(root + "/hugo.toml", "baseURL = 'https://example.com/'\n");
+	util::WriteFileAtomic(root + "/static/img/used.png", "x");
+	util::WriteFileAtomic(root + "/static/img/orphan.png", "x");
+	util::WriteFileAtomic(root + "/static/CNAME", "example.com");
+	util::WriteFileAtomic(root + "/content/posts/one.md",
+	                      "+++\ntitle = 'One'\ndate = '2026-01-01T00:00:00Z'\nsummary = 's'\n"
+	                      "tags = ['a']\n+++\n"
+	                      "![](/img/used.png)\n"
+	                      "![](/img/gone.png)\n"
+	                      "[good](/posts/two/)\n"
+	                      "[bad](/posts/nowhere/)\n"
+	                      "[home](/) and [tag](/tags/a/) and [out](https://example.org/)\n");
+	util::WriteFileAtomic(root + "/content/posts/two.md", "+++\ntitle = 'Two'\ndraft = true\n+++\n");
+
+	site::Site s;
+	CHECK(s.Detect(root));
+	s.Scan();
+	s.ScanMedia();
+	std::string cfg;
+	util::ReadFile(s.config, &cfg);
+	audit::Report rep = audit::Run(s, cfg);
+
+	CHECK_EQ(rep.pages, 2);
+	CHECK_EQ(rep.Count(audit::Kind::MissingImage), 1);
+	CHECK_EQ(rep.Count(audit::Kind::BrokenLink), 1);
+	// /posts/two/, /, and /tags/a/ all resolve; the external one is skipped.
+	CHECK_EQ(rep.Count(audit::Kind::Draft), 1);
+	CHECK_EQ(rep.Count(audit::Kind::EmptyBody), 1);
+	CHECK_EQ(rep.Count(audit::Kind::NoDate), 1);   // two.md has none
+	CHECK_EQ(rep.Count(audit::Kind::NoTags), 1);
+
+	// used.png is referenced, orphan.png is not, CNAME is never counted.
+	CHECK(!rep.Unreferenced("static/img/used.png"));
+	CHECK(rep.Unreferenced("static/img/orphan.png"));
+	CHECK(!rep.Unreferenced("static/CNAME"));
+
+	// Errors sort to the top, so the first thing in the list is worth fixing.
+	CHECK(!rep.findings.empty());
+	CHECK(rep.findings[0].level == audit::Level::Error);
+	CHECK_EQ(rep.errors, 2);
+
+	// A file named only by hugo.toml counts as referenced -- that is how the
+	// avatar and the favicons survive.
+	util::WriteFileAtomic(s.config, "baseURL = 'https://example.com/'\nimageUrl = '/img/orphan.png'\n");
+	util::ReadFile(s.config, &cfg);
+	audit::Report rep2 = audit::Run(s, cfg);
+	CHECK(!rep2.Unreferenced("static/img/orphan.png"));
+
+	// Clean up: a test that leaves files behind fails differently next run.
+	for (const char *f : {"/content/posts/one.md", "/content/posts/two.md", "/static/img/used.png",
+	                      "/static/img/orphan.png", "/static/CNAME", "/hugo.toml"})
+		remove((root + f).c_str());
+	for (const char *d : {"/content/posts", "/content", "/static/img", "/static", ""})
+		rmdir((root + d).c_str());
+}
+
 int main() {
 	test_util();
 	test_fm_toml();
@@ -434,6 +633,11 @@ int main() {
 	test_markdown_blocks();
 	test_markdown_inline();
 	test_markdown_transform();
+	test_find_replace();
+	test_outline();
+	test_fuzzy();
+	test_audit_refs();
+	test_audit_run();
 	printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

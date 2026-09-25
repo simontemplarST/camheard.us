@@ -41,6 +41,7 @@ void App::ReloadAll() {
 	site.Scan();
 	site.ScanMedia();
 	ReloadConfig();
+	audit_stale = true;
 	selected = -1;
 	for (size_t i = 0; i < site.posts.size(); i++)
 		if (site.posts[i].path == keep) selected = (int)i;
@@ -63,6 +64,26 @@ bool App::OpenPost(const std::string &path) {
 	ed.preview_dark = cfg.GetString("params.defaultTheme", "dark") != "light";
 	tab = Tab::Editor;
 	return true;
+}
+
+void App::RequestOpen(const std::string &path) {
+	if (path == ed.path) {
+		tab = Tab::Editor;
+		return;
+	}
+	// Opening another page with edits in flight used to throw them away
+	// silently. Park the request and let the modal decide.
+	if (ed.dirty) {
+		pending_open = path;
+		return;
+	}
+	OpenPost(path);
+}
+
+void App::EnsureAudit() {
+	if (!audit_stale) return;
+	report = audit::Run(site, cfg_text_on_disk);
+	audit_stale = false;
 }
 
 bool App::SavePost() {
@@ -186,6 +207,7 @@ const TabDef kTabs[(int)Tab::COUNT] = {
     {"Editor", "write, with a live preview"},
     {"Design", "the site's own UI: header, home page, menus, post options"},
     {"Media", "files under static/ and assets/"},
+    {"Check", "broken links, missing images, files nothing points at"},
     {"Publish", "build, preview, commit, push"},
 };
 
@@ -350,6 +372,35 @@ void DrawModals(App &a) {
 		ImGui::EndPopup();
 	}
 
+	if (!a.pending_open.empty()) ImGui::OpenPopup("Open another page");
+	if (ImGui::BeginPopupModal("Open another page", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		ImGui::Text("%s has unsaved changes.", util::BaseName(a.ed.path).c_str());
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::V4(Theme::TEXT_DIM));
+		ImGui::TextWrapped("Opening %s would leave them behind.", util::BaseName(a.pending_open).c_str());
+		ImGui::PopStyleColor();
+		ImGui::Dummy(ImVec2(0, 6));
+		std::string next = a.pending_open;
+		if (W::PrimaryButton("Save and open", ImVec2(140, 0))) {
+			a.SavePost();
+			a.pending_open.clear();
+			a.OpenPost(next);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (W::DangerButton("Discard", ImVec2(110, 0))) {
+			a.ed.dirty = false;
+			a.pending_open.clear();
+			a.OpenPost(next);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(110, 0))) {
+			a.pending_open.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+
 	if (a.confirm_quit) {
 		ImGui::OpenPopup("Unsaved changes");
 		a.confirm_quit = false;
@@ -398,7 +449,12 @@ void DrawSetupScreen(App &a) {
 
 void HandleShortcuts(App &a) {
 	ImGuiIO &io = ImGui::GetIO();
+	// F1 is the shortcut worth knowing without being told, so it is the one
+	// that works with a text field focused.
+	if (ImGui::IsKeyPressed(ImGuiKey_F1, false)) a.want_shortcuts = !a.want_shortcuts;
 	if (!io.KeyCtrl) return;
+	// Quick open: the one key that reaches anything from anywhere.
+	if (ImGui::IsKeyPressed(ImGuiKey_P, false)) a.want_palette = true;
 	if (ImGui::IsKeyPressed(ImGuiKey_S, false)) {
 		if (a.ed.dirty) a.SavePost();
 		if (a.cfg_dirty) a.SaveConfig();
@@ -409,6 +465,13 @@ void HandleShortcuts(App &a) {
 	if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_R, false)) {
 		a.ReloadAll();
 		a.Notify("rescanned the site");
+	}
+	// Ctrl+F belongs to the editor, but it has to open the bar from here
+	// too: with the preview focused there is no text box to catch it.
+	if (ImGui::IsKeyPressed(ImGuiKey_F, false) && !a.ed.path.empty()) {
+		a.tab = Tab::Editor;
+		a.ed.find_open = true;
+		a.ed.focus_find = true;
 	}
 }
 
@@ -466,7 +529,8 @@ void HandleDroppedFiles(App &a) {
 namespace {
 
 struct SelfTest {
-	int frame = 0;
+	int step = 0;       // which assertion block runs next
+	int settle = 0;     // frames waited since the last one
 	int failures = 0;
 	int checks = 0;
 	std::string path;
@@ -482,10 +546,19 @@ struct SelfTest {
 	}
 
 	// Returns false when the run is over.
+	//
+	// Steps are gated on the edit queue draining rather than on a frame
+	// number: a queued action is applied inside the text box's callback,
+	// which first needs ImGui to hand the box focus, and how many frames
+	// that takes is ImGui's business. Counting frames here made the run
+	// flaky on a cold start, which is the last thing a test of the focus
+	// plumbing should be.
 	bool Step(App &a) {
-		frame++;
-		switch (frame) {
-		case 3: {
+		if (a.ed.pending != EditAction::None) return true;
+		if (++settle < 3) return true;
+		settle = 0;
+		switch (step++) {
+		case 0: {
 			const char *tmp = getenv("TMPDIR");
 			path = std::string(tmp && *tmp ? tmp : "/tmp") + "/hugofe-selftest-" +
 			       std::to_string((int)getpid()) + ".md";
@@ -499,14 +572,14 @@ struct SelfTest {
 			a.tab = Tab::Editor;
 			break;
 		}
-		case 5:
+		case 1:
 			// Select "hello" and ask for bold, exactly as the B button does.
 			a.ed.sel_a = 0;
 			a.ed.sel_b = 5;
 			a.ed.pending = EditAction::Bold;
 			a.ed.focus_editor = true;
 			break;
-		case 9:
+		case 2:
 			Check(a.ed.body == "**hello** world\nsecond line\n", "B wraps the selection", a.ed.body);
 			Check(a.ed.sel_a == 2 && a.ed.sel_b == 7, "the selection follows the markers",
 			      std::to_string(a.ed.sel_a) + ".." + std::to_string(a.ed.sel_b));
@@ -515,25 +588,67 @@ struct SelfTest {
 			a.ed.pending = EditAction::Bold;
 			a.ed.focus_editor = true;
 			break;
-		case 13:
+		case 3:
 			Check(a.ed.body == "hello world\nsecond line\n", "B again toggles it back off", a.ed.body);
 			a.ed.sel_a = a.ed.sel_b = 13;  // somewhere on line two
 			a.ed.pending = EditAction::H2;
 			a.ed.focus_editor = true;
 			break;
-		case 17:
+		case 4:
 			Check(a.ed.body == "hello world\n## second line\n", "H2 applies to the caret's line", a.ed.body);
 			a.ed.sel_a = 0;
 			a.ed.sel_b = 11;
 			a.ed.pending = EditAction::Bullet;
 			a.ed.focus_editor = true;
 			break;
-		case 21:
+		case 5:
 			Check(a.ed.body == "- hello world\n## second line\n", "list prefixes the selected line",
 			      a.ed.body);
 			Check(a.SavePost(), "saves");
 			break;
-		case 23: {
+		case 6:
+			// The find bar drives the text box from outside it, exactly as
+			// the toolbar does, so it needs the same proof. Body here is
+			// "- hello world\n## second line\n".
+			a.ed.find_text = "l";
+			Check((int)md::FindAll(a.ed.body, "l", false).size() == 4, "FindAll sees every match");
+			a.ed.find_text = "line";
+			a.ed.pending_sel_a = (int)a.ed.body.find("line");
+			a.ed.pending_sel_b = a.ed.pending_sel_a + 4;
+			a.ed.pending = EditAction::Select;
+			a.ed.focus_editor = true;
+			break;
+		case 7:
+			Check(a.ed.sel_a == (int)a.ed.body.find("line") && a.ed.sel_b == a.ed.sel_a + 4,
+			      "a find jump moves the real selection",
+			      std::to_string(a.ed.sel_a) + ".." + std::to_string(a.ed.sel_b));
+			Check(!a.ed.dirty, "jumping to a match does not dirty the post");
+			a.ed.pending = EditAction::ReplaceCurrent;
+			a.ed.pending_repl = "row";
+			a.ed.pending_case = false;
+			a.ed.focus_editor = true;
+			break;
+		case 8:
+			Check(a.ed.body == "- hello world\n## second row\n", "Replace rewrites the match", a.ed.body);
+			Check(a.ed.dirty, "replacing dirties the post");
+			a.ed.find_text = "o";
+			a.ed.pending = EditAction::ReplaceEvery;
+			a.ed.pending_repl = "0";
+			a.ed.focus_editor = true;
+			break;
+		case 9: {
+			Check(a.ed.body == "- hell0 w0rld\n## sec0nd r0w\n", "Replace all rewrites every match",
+			      a.ed.body);
+			std::vector<md::Heading> hs = md::Outline(a.ed.body);
+			Check(hs.size() == 1 && hs[0].level == 2, "the outline finds the heading",
+			      std::to_string(hs.size()));
+			Check(hs.size() == 1 && a.ed.body.compare(hs[0].offset, 2, "##") == 0,
+			      "the outline's offset points at the heading line");
+			a.ed.find_text.clear();
+			a.ed.dirty = false;  // this run is not allowed to write those edits out
+			break;
+		}
+		case 10: {
 			std::string on_disk;
 			util::ReadFile(path, &on_disk);
 			Check(on_disk.find("- hello world") != std::string::npos, "the body reached the file", on_disk);
@@ -556,7 +671,18 @@ struct SelfTest {
 			unlink(path.c_str());
 			break;
 		}
-		case 25:
+		case 11:
+			// The unsaved-changes guard. Opening another page with edits in
+			// flight used to discard them without a word.
+			a.ed.dirty = true;
+			a.RequestOpen("/nowhere/other.md");
+			Check(a.ed.path == path, "a dirty editor is not replaced out from under you", a.ed.path);
+			Check(a.pending_open == "/nowhere/other.md", "the request is parked for the modal",
+			      a.pending_open);
+			a.pending_open.clear();
+			a.ed.dirty = false;
+			break;
+		case 12:
 			printf("\n%d checks, %d failed\n", checks, failures);
 			return false;
 		}
@@ -690,6 +816,7 @@ int main(int argc, char **argv) {
 			case Tab::Editor: DrawEditorTab(app); break;
 			case Tab::Design: DrawDesignTab(app); break;
 			case Tab::Media: DrawMediaTab(app); break;
+			case Tab::Check: DrawCheckTab(app); break;
 			case Tab::Publish: DrawPublishTab(app); break;
 			default: break;
 			}
@@ -697,6 +824,8 @@ int main(int argc, char **argv) {
 			ImGui::PopStyleVar();
 			DrawStatusBar(app);
 			DrawModals(app);
+			DrawPalette(app);
+			DrawShortcutsWindow(app);
 		}
 		ImGui::End();
 
@@ -715,15 +844,32 @@ int main(int argc, char **argv) {
 			static const Step steps[] = {
 			    {6, Tab::Content, "1-content"}, {12, Tab::Editor, "2-editor"},
 			    {18, Tab::Design, "3-design"},  {24, Tab::Media, "4-media"},
-			    {30, Tab::Publish, "5-publish"},
-			    {36, Tab::Design, "6-design-postlist"},
+			    {30, Tab::Check, "5-check"},    {36, Tab::Publish, "6-publish"},
+			    {42, Tab::Design, "7-design-postlist"},
+			    {48, Tab::Editor, "8-editor-find"},
+			    {60, Tab::Content, "9-quick-open"},
 			};
 			shot_frame++;
+			// The palette is a modal that opens on a flag and clears its own
+			// box, and glReadPixels after the swap reads a buffer a frame or
+			// two behind, so it gets set up well ahead of its capture rather
+			// than in the generic three-frame run-up.
+			if (shot_frame == 52) app.want_palette = true;
+			if (shot_frame == 54) app.palette_q = "post";
 			for (const Step &s : steps) {
 				if (shot_frame == s.frame - 3) {
 					app.tab = s.tab;
 					// The second Design capture is the post-list mock.
-					if (s.frame == 36) app.design_page = 1;
+					if (s.frame == 42) app.design_page = 1;
+					// The second Editor capture has the two optional panes
+					// open, since a screenshot is the only way anyone looks
+					// at them without building the thing.
+					if (s.frame == 48) {
+						app.ed.show_outline = true;
+						app.ed.find_open = true;
+						app.ed.find_text = "the";
+					}
+
 					if (s.tab == Tab::Editor && app.ed.path.empty() && !app.site.posts.empty()) {
 						// Open the longest page, so the preview has something
 						// worth looking at.
@@ -740,7 +886,7 @@ int main(int argc, char **argv) {
 					else fprintf(stderr, "failed to write %s\n", p.c_str());
 				}
 			}
-			if (shot_frame > steps[5].frame) running = false;
+			if (shot_frame > steps[IM_ARRAYSIZE(steps) - 1].frame) running = false;
 		}
 	}
 

@@ -99,7 +99,7 @@ void DetailPanel(App &a, int idx) {
 
 	ImGui::Dummy(ImVec2(0, 8));
 	W::SectionHeader("Actions");
-	if (W::PrimaryButton("Edit", ImVec2(-1, 0))) a.OpenPost(p.path);
+	if (W::PrimaryButton("Edit", ImVec2(-1, 0))) a.RequestOpen(p.path);
 
 	std::string path = p.path;
 	bool draft = p.draft;
@@ -121,7 +121,7 @@ void DetailPanel(App &a, int idx) {
 		std::string dest, err;
 		if (Duplicate(p, &dest, &err)) {
 			a.ReloadAll();
-			a.OpenPost(dest);
+			a.RequestOpen(dest);
 			a.Notify("duplicated to " + util::BaseName(dest));
 		} else a.Notify(err, true);
 	}
@@ -252,10 +252,10 @@ void DrawContentTab(App &a) {
 			ImGui::PushID(i);
 			bool sel = (a.selected == i);
 			if (ImGui::Selectable(p.title.c_str(), sel, ImGuiSelectableFlags_SpanAllColumns)) a.selected = i;
-			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) a.OpenPost(p.path);
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) a.RequestOpen(p.path);
 			if (ImGui::BeginPopupContextItem("row")) {
 				a.selected = i;
-				if (ImGui::MenuItem("Edit")) a.OpenPost(p.path);
+				if (ImGui::MenuItem("Edit")) a.RequestOpen(p.path);
 				if (ImGui::MenuItem("Open in browser", nullptr, false, a.server.Running()))
 					util::OpenURL(a.LocalURL(p));
 				if (ImGui::MenuItem("Copy path")) ImGui::SetClipboardText(p.path.c_str());
@@ -389,7 +389,7 @@ void DrawNewPostModal(App &a) {
 			if (!d.Has("date")) d.SetStr("date", util::NowRFC3339());
 			util::WriteFileAtomic(path, fm::Serialize(d));
 			a.ReloadAll();
-			a.OpenPost(path);
+			a.RequestOpen(path);
 			a.Notify("created content/" + rel);
 			ImGui::CloseCurrentPopup();
 		} else {

@@ -68,4 +68,35 @@ void InsertText(std::string *text, int *a, int *b, const std::string &s);
 // A link out of the selection: [selected](url), or [text](url) when empty.
 void MakeLink(std::string *text, int *a, int *b, const std::string &url, bool image);
 
+// ---- find and replace ------------------------------------------------------
+// Plain text, not regex: the editor's find bar is for fixing a misspelled
+// name across a post, and a regex box in a writing tool is a footgun with a
+// help page attached.
+
+// Byte offsets of every match, left to right, non-overlapping.
+std::vector<int> FindAll(const std::string &hay, const std::string &needle, bool case_sensitive);
+// Replaces the match at [*a, *b) -- only when the selection really is that
+// match, so "replace" can never silently eat something else. The range ends
+// up around the replacement.
+bool ReplaceOne(std::string *text, int *a, int *b, const std::string &needle, const std::string &repl,
+                bool case_sensitive);
+// Replaces every match and returns how many. The range is carried along so
+// the caret does not jump to the top of the post afterwards.
+int ReplaceAll(std::string *text, int *a, int *b, const std::string &needle, const std::string &repl,
+               bool case_sensitive);
+
+// ---- outline ---------------------------------------------------------------
+
+struct Heading {
+	int level = 1;      // 1..6
+	std::string text;   // the heading's text, markers and trailing #s removed
+	int line = 0;       // 0-based line in the source
+	int offset = 0;     // byte offset of the start of that line
+};
+
+// Every ATX heading in the body, in document order. Headings inside a fenced
+// code block are not headings -- a shell prompt in a code sample is the most
+// common false positive there is.
+std::vector<Heading> Outline(const std::string &markdown);
+
 } // namespace md
